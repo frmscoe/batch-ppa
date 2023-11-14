@@ -4,11 +4,6 @@ import * as fs from 'fs';
 import { configuration } from '../config';
 import { type TransactionRelationship } from '../interfaces/iTransactionRelationship';
 import { LoggerService } from '../logger.service';
-import { type Pain001 } from '../classes/pain.001.001.11';
-import { type Pain013 } from '../classes/pain.013.001.09';
-import { type Pacs002 } from '../classes/pacs.002.001.12';
-import { type Pacs008 } from '../classes/pacs.008.001.10';
-import { type GeneratedAqlQuery } from 'arangojs/aql';
 
 export class ArangoDBService {
   transactionHistoryClient: Database;
@@ -211,7 +206,7 @@ export class ArangoDBService {
   }
 
   async SyncPacs002AndTransaction(): Promise<void> {
-    const removeNoReportPacs002 = `
+    const removeNoReportPacs002 = aql`
     LET pacs002List = (
       FOR report IN transactions
        RETURN report.transaction.FIToFIPmtSts.TxInfAndSts.OrgnlEndToEndId
@@ -227,7 +222,7 @@ export class ArangoDBService {
           FILTER pacs002D.EndToEndId IN pacs002NoReport
           REMOVE pacs002D IN transactionHistoryPacs002
       `;
-    const removeReportNoPacs002 = `
+    const removeReportNoPacs002 = aql`
       LET pacs002List = (
         FOR doc IN transactionHistoryPacs002
          RETURN doc.EndToEndId
@@ -244,7 +239,25 @@ export class ArangoDBService {
             REMOVE transactionD IN transactions
         `;
 
+    const reportList = aql`
+            FOR report IN transactions
+            RETURN report.transaction.FIToFIPmtSts.TxInfAndSts.OrgnlEndToEndId`;
+
+    const lisOfReports = await this.query(
+      reportList,
+      this.transactionHistoryClient,
+    );
+
+    const removeEdgeNoReport = aql`
+        FOR edgeDel IN transactionRelationship
+            FILTER edgeDel.TxTp == "pacs.002.001.12"
+            AND edgeDel.EndToEndId NOT IN ${
+              lisOfReports && lisOfReports[0] ? lisOfReports[0] : ['']
+            }
+            REMOVE edgeDel IN transactionRelationship`;
+
     Promise.all([
+      // await this.query(removeEdgeNoReport, this.pseudonymsClient),
       await this.query(removeNoReportPacs002, this.transactionHistoryClient),
       await this.query(removeReportNoPacs002, this.transactionHistoryClient),
     ]);
@@ -292,7 +305,7 @@ export class ArangoDBService {
                             LET timeDeltaToNow = DATE_DIFF(DATE_TIMESTAMP(newestPacs008[0].FIToFICstmrCdt.GrpHdr.CreDtTm), DATE_NOW(), "millisecond", false)
                             FOR doc IN ${dbPacs008}
                                 LET newDoc = {"GrpHdr": {"CreDtTm": DATE_ADD(DATE_TIMESTAMP(doc.FIToFICstmrCdt.GrpHdr.CreDtTm), timeDeltaToNow, "millisecond")}}
-                              UPDATE doc WITH { FIToFICstmrCdtTrf: MERGE(doc.FIToFICstmrCdt, newDoc) } IN ${dbPacs008}`;
+                              UPDATE doc WITH { FIToFICstmrCdt: MERGE(doc.FIToFICstmrCdt, newDoc) } IN ${dbPacs008}`;
 
     const queryPacs013 = aql`LET newestPain013 = (
                           FOR pain013 IN ${dbPain013}
@@ -337,9 +350,8 @@ export class ArangoDBService {
     );
     const query = aql`
         FOR pacs008 IN ${db}
-        SORT pacs008.FIToFICstmrCdt.GrpHdr.CreDtTm ASC
-        LIMIT 1
-        RETURN pacs008.FIToFICstmrCdt.GrpHdr.CreDtTm`;
+        COLLECT AGGREGATE oldestPacs008 = MIN(pacs008.FIToFICstmrCdt.GrpHdr.CreDtTm)
+    RETURN oldestPacs008`;
 
     try {
       return (
@@ -365,11 +377,12 @@ export class ArangoDBService {
 
   async getTransactionReport(EndToEndId: string): Promise<unknown> {
     const db = this.transactionHistoryClient.collection('transactions');
-    const query = aql`FOR doc IN ${db}
-      FILTER doc.transaction.EndToEndId == ${EndToEndId}
+    const query = aql`
+      FOR doc IN ${db}
+      FILTER doc.transaction.FIToFIPmtSts.TxInfAndSts.OrgnlEndToEndId == ${EndToEndId}
       RETURN doc`;
-
-    return await this.query(query, this.transactionHistoryClient);
+    const report = await this.query(query, this.transactionHistoryClient);
+    return report;
   }
 
   async addAccount(hash: string): Promise<void> {
@@ -403,6 +416,7 @@ export class ArangoDBService {
       this.pseudonymsClient,
       'account_holder',
       {
+        _key: `${accountId}${entityId}`,
         _from: `entities/${entityId}`,
         _to: `accounts/${accountId}`,
         CreDtTm,

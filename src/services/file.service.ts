@@ -2,7 +2,8 @@
 import { type Pain001 } from '../classes/pain.001.001.11';
 import * as fs from 'fs';
 import * as readline from 'readline';
-import { databaseClient, dbService } from '..';
+import { databaseClient } from '..';
+import sendMissingTransactionsCMS from '../utils/patchcms-tools';
 import { configuration } from '../config';
 import { LoggerService } from '../logger.service';
 import {
@@ -27,9 +28,27 @@ const getMissingTransaction = async (
     endToEndIds.push(columns[Fields.END_TO_END_TRANSACTION_ID]);
   }
 
-  endToEndIds = (await dbService.getUnExistingTransactions(endToEndIds))[0];
+  endToEndIds = (
+    await databaseClient.getUnExistingTransactions(endToEndIds)
+  )[0];
 
   return endToEndIds;
+};
+
+const getOldestPacs002 = async (
+  batchSourceFileLineOld: readline.Interface,
+): Promise<Date> => {
+  const dateArray = new Array<Date>();
+
+  for await (const lineOldest of batchSourceFileLineOld) {
+    const columns = lineOldest.split('|');
+    if (!new Date(columns[Fields.PROCESSING_DATE_TIME]).getTime()) continue;
+    dateArray.push(new Date(columns[Fields.PROCESSING_DATE_TIME]));
+  }
+  const oldestDate = dateArray.sort((a, b) => {
+    return Date.parse(a.toDateString()) - Date.parse(b.toDateString());
+  });
+  return oldestDate[0];
 };
 
 const sendPacs002Transaction = async (
@@ -37,7 +56,9 @@ const sendPacs002Transaction = async (
   delta: number,
 ): Promise<boolean> => {
   LoggerService.log('Sending Pacs002 message...');
-  const currentPacs002 = GetPacs002(columns, new Date(delta + Date.now()));
+  const newPacs002Date =
+    new Date(columns[Fields.PROCESSING_DATE_TIME]).getTime() + delta;
+  const currentPacs002 = GetPacs002(columns, new Date(newPacs002Date));
   LoggerService.log(
     `${JSON.stringify(currentPacs002.FIToFIPmtSts.GrpHdr.MsgId)} - Submitted`,
   );
@@ -70,6 +91,11 @@ const sendPrepareTransaction = async (
 export const SendLineMessages = async (requestBody: any): Promise<string> => {
   // Note: we use the crlfDelay option to recognize all instances of CR LF
   // ('\r\n') in input.txt as a single line break.
+  if (requestBody.cmspatch) {
+    sendMissingTransactionsCMS();
+    return 'Patching the missing transactions';
+  }
+
   if (
     (requestBody.update && requestBody.pacs002) ||
     (requestBody.pacs002 === undefined && requestBody.update === undefined)
@@ -81,22 +107,30 @@ export const SendLineMessages = async (requestBody: any): Promise<string> => {
 
   if (requestBody.update) {
     if (requestBody.update.seedPacs002) {
-      await dbService.RemovePacs002Pseudonym();
+      await databaseClient.RemovePacs002Pseudonym();
     }
-    await dbService.UpdateHistoryTransactionsTimestamp();
-    await dbService.UpdatePseudonymEdgesTimestamp();
+    await databaseClient.UpdateHistoryTransactionsTimestamp();
+    await databaseClient.UpdatePseudonymEdgesTimestamp();
     LoggerService.log(
       `Updating preparation data transaction's created time date`,
     );
     return 'Updated the timestamp of the prepare data';
   }
 
-  let oldestTimestamp: Date;
+  let oldestTimestamp: Date = new Date();
   let delta = 0;
 
   if (requestBody.pacs002) {
-    oldestTimestamp = await dbService.getOldestTimestampPacs008();
-    delta = Date.now() - new Date(oldestTimestamp).getTime();
+    const oldestTimestampPacs002 = (
+      await getOldestPacs002(
+        readline.createInterface({
+          input: fs.createReadStream('./uploads/input.txt'),
+          crlfDelay: Infinity,
+        }),
+      )
+    ).getTime();
+    oldestTimestamp = await databaseClient.getOldestTimestampPacs008();
+    delta = new Date(oldestTimestamp).getTime() - oldestTimestampPacs002;
   }
 
   const retry = requestBody.pacs002.overwrite ? configuration.retry : 1;
@@ -165,7 +199,7 @@ export const SendLineMessages = async (requestBody: any): Promise<string> => {
         if (configuration.verifyReports) {
           let value;
           try {
-            value = await dbService.getTransactionReport(EndToEndId);
+            value = await databaseClient.getTransactionReport(EndToEndId);
           } catch (ex) {
             LoggerService.error(
               `Failed to communicate with Arango to check report. ${JSON.stringify(
@@ -197,7 +231,7 @@ export const SendLineMessages = async (requestBody: any): Promise<string> => {
         }
       }
     }
-    databaseClient.SyncPacs002AndTransaction();
+    // databaseClient.SyncPacs002AndTransaction();
   }
   return `Submitted Transactions`;
   async function delay(time: number | undefined): Promise<unknown> {

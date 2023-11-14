@@ -8,6 +8,7 @@
     "dev": "nodemon -r dotenv/config",
     "build": "tsc --project tsconfig.json",
     "start": "node -r dotenv/config build/index.js",
+    "start:profile": "tsc --project tsconfig.json && node --inspect -r dotenv/config build/index.js",
     "cleanup": "rm -rf dist template jest.config.js jest.config.js.map node_modules",
     "fix": "npm run fix:prettier && npm run fix:eslint",
     "fix:eslint": "eslint --fix \"**/*.ts\"",
@@ -31,6 +32,7 @@
   ],
   "license": "ISC",
   "dependencies": {
+    "@frmscoe/frms-coe-startup-lib": "^2.1.0",
     "@log4js-node/logstash-http": "^1.1.0",
     "@types/formidable": "^3.4.0",
     "arangojs": "^8.4.0",
